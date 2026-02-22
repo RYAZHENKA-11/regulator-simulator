@@ -63,7 +63,7 @@ This project accompanies the article explaining how PID works in simple terms. I
 3. Run the simulator:
 
     ```bash
-    python main.py
+    ./start.sh
     ```
 
 ### 🎮 Controls
@@ -144,7 +144,7 @@ This project accompanies the article explaining how PID works in simple terms. I
 3. Запустите файл:
 
     ```Bash
-    python main.py
+    ./start.sh
     ```
 
 ### 🎮 Управление

@@ -315,18 +315,35 @@ class SimView:
             dt: Delta time for smooth transitions
         """
         keys = pygame.key.get_pressed()
-        if keys[pygame.K_LCTRL] or keys[pygame.K_RCTRL]:
+        mods = pygame.key.get_mods()
+        ctrl_pressed = mods & (pygame.KMOD_LCTRL | pygame.KMOD_RCTRL)
+        shift_pressed = mods & (pygame.KMOD_LSHIFT | pygame.KMOD_RSHIFT)
+        
+        if ctrl_pressed and not shift_pressed:
             if keys[pygame.K_EQUALS] or keys[pygame.K_KP_PLUS]:
                 self.scale *= 1.0 + 2.0 * dt
             if keys[pygame.K_MINUS] or keys[pygame.K_KP_MINUS]:
                 self.scale *= 1.0 - 2.0 * dt
-        if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]:
+        if shift_pressed and not ctrl_pressed:
             if keys[pygame.K_EQUALS] or keys[pygame.K_KP_PLUS]:
                 self.speed *= 1.0 + 2.0 * dt
             if keys[pygame.K_MINUS] or keys[pygame.K_KP_MINUS]:
                 self.speed *= 1.0 - 2.0 * dt
             if keys[pygame.K_r]:
                 self.speed = 1.0
+        # Coefficient adjustment: number keys 1-6
+        if keys[pygame.K_1]:
+            self.sim.p_coef += dt * 0.5
+        if keys[pygame.K_2]:
+            self.sim.p_coef = max(0, self.sim.p_coef - dt * 0.5)
+        if keys[pygame.K_3]:
+            self.sim.i_coef += dt * 0.5
+        if keys[pygame.K_4]:
+            self.sim.i_coef = max(0, self.sim.i_coef - dt * 0.5)
+        if keys[pygame.K_5]:
+            self.sim.d_coef += dt * 0.5
+        if keys[pygame.K_6]:
+            self.sim.d_coef = max(0, self.sim.d_coef - dt * 0.5)
 
     def _draw_surface(self):
         """Renders the inclined surface based on external forces."""
@@ -426,6 +443,16 @@ class SimView:
             f"Speed: {self.speed:.2f}",
             "PAUSED" if self.is_pause else "RUNNING",
         ]
+        dynamic_pid_status = [
+            f"P: {self.sim.p_coef:.3f}",
+            f"I: {self.sim.i_coef:.3f}",
+            f"D: {self.sim.d_coef:.3f}",
+        ]
+        pid_control_keys = [
+            "P: 1 / 2",
+            "I: 3 / 4",
+            "D: 5 / 6",
+        ]
         x_offset = TEXT_OFFSET * self.ssaa
         y_offset = TEXT_OFFSET * self.ssaa
 
@@ -439,11 +466,22 @@ class SimView:
             text_tex = Texture.from_surface(self._renderer, text_surf)
             w, h = text_tex.width, text_tex.height
             text_tex.draw(dstrect=(x_offset, y_offset + i * h * TEXT_STRING_INTERVAL))
+        for i, line in enumerate(dynamic_pid_status):
+            text_surf = self._font.render(line, True, DYNAMIC_TEXT_COLOR)
+            text_tex = Texture.from_surface(self._renderer, text_surf)
+            w, h = text_tex.width, text_tex.height
+            text_tex.draw(dstrect=(x_offset, y_offset + (len(dynamic_system_status) + i) * h * TEXT_STRING_INTERVAL))
         for i, line in enumerate(static_control_keys):
             text_surf = self._font.render(line, True, STATIC_TEXT_COLOR)
             text_tex = Texture.from_surface(self._renderer, text_surf)
             w, h = text_surf.get_size()
             text_tex.draw(dstrect=(self._draw_width - x_offset - w, y_offset + i * h * TEXT_STRING_INTERVAL))
+        for i, line in enumerate(pid_control_keys):
+            text_surf = self._font.render(line, True, STATIC_TEXT_COLOR)
+            text_tex = Texture.from_surface(self._renderer, text_surf)
+            w, h = text_surf.get_size()
+            text_tex.draw(dstrect=(self._draw_width - x_offset - w,
+                                   y_offset + (len(static_control_keys) + i) * h * TEXT_STRING_INTERVAL))
         for i, line in enumerate(static_view_status):
             text_surf = self._font.render(line, True, STATIC_TEXT_COLOR)
             text_tex = Texture.from_surface(self._renderer, text_surf)

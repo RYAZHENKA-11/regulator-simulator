@@ -21,7 +21,10 @@ class Sim:
             target_x: float = 0.0,
             x0: float = 1.0,
             v0: float = 0.0,
-            f0: float = 0.0
+            f0: float = 0.0,
+            p_coef: float = 0.0,
+            i_coef: float = 0.0,
+            d_coef: float = 0.0
     ) -> None:
         """
         Initialize the simulator system.
@@ -42,6 +45,9 @@ class Sim:
             x0: Initial position (m)
             v0: Initial velocity (m/s)
             f0: Initial force (N)
+            p_coef: Proportional coefficient for PID regulator
+            i_coef: Integral coefficient for PID regulator
+            d_coef: Derivative coefficient for PID regulator
         """
         if freq <= 0:
             raise ValueError("Sampling frequency must be positive")
@@ -54,6 +60,13 @@ class Sim:
         self._freq = freq
         self._dt = 1.0 / freq
         self.target_x = target_x
+        self._p_coef = p_coef
+        self._i_coef = i_coef
+        self._d_coef = d_coef
+
+        self.regulator.p_coef = p_coef
+        self.regulator.i_coef = i_coef
+        self.regulator.d_coef = d_coef
 
         self.x0 = x0
         self.v0 = v0
@@ -109,6 +122,48 @@ class Sim:
     def f(self) -> float:
         """Getter: returns the f value."""
         return self._f
+
+    @property
+    def p_coef(self) -> float:
+        """Getter: returns the P coefficient value."""
+        return self._p_coef
+
+    @p_coef.setter
+    def p_coef(self, p_coef: float) -> None:
+        """Setter: adds validation logic."""
+        if p_coef < 0:
+            raise ValueError("P coefficient cannot be negative")
+        self._p_coef = p_coef
+        if hasattr(self.regulator, 'p_coef'):
+            self.regulator.p_coef = p_coef
+
+    @property
+    def i_coef(self) -> float:
+        """Getter: returns the I coefficient value."""
+        return self._i_coef
+
+    @i_coef.setter
+    def i_coef(self, i_coef: float) -> None:
+        """Setter: adds validation logic."""
+        if i_coef < 0:
+            raise ValueError("I coefficient cannot be negative")
+        self._i_coef = i_coef
+        if hasattr(self.regulator, 'i_coef'):
+            self.regulator.i_coef = i_coef
+
+    @property
+    def d_coef(self) -> float:
+        """Getter: returns the D coefficient value."""
+        return self._d_coef
+
+    @d_coef.setter
+    def d_coef(self, d_coef: float) -> None:
+        """Setter: adds validation logic."""
+        if d_coef < 0:
+            raise ValueError("D coefficient cannot be negative")
+        self._d_coef = d_coef
+        if hasattr(self.regulator, 'd_coef'):
+            self.regulator.d_coef = d_coef
 
     def _calc_while_dt(self, dt: float) -> None:
         """

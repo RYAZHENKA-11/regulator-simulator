@@ -100,7 +100,7 @@ class PlayerController:
             if event.type in (pygame.QUIT, pygame.WINDOWCLOSE):
                 self.stop()
             elif event.type == pygame.WINDOWRESIZED:
-                self._graphics_renderer.update_target_texture()
+                self._graphics_renderer.update_size()
             elif event.type == pygame.KEYDOWN:
                 mode = pygame.key.get_mods()
                 if event.scancode == pygame.KSCAN_R and not (mode & pygame.KMOD_SHIFT):

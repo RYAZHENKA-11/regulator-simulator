@@ -12,24 +12,23 @@ except ImportError as exc:
         "Install it with: pip install pygame-ce."
     ) from exc
 
-from .graphics_renderer import GraphicsRenderer
+from .graphics_renderer import Color, GraphicsRenderer
 from .simulator import Simulator
 
 BASE_DIR = pathlib.Path(__file__).resolve().parent
 IMAGES_DIR = BASE_DIR / "images"
 FONTS_DIR = BASE_DIR / "fonts"
 ROBOT_IMG_PATH = IMAGES_DIR / "robot.png"
-FORCE_IMG_PATH = IMAGES_DIR / "arrow.png"
+ARROW_IMG_PATH = IMAGES_DIR / "arrow.png"
 FONT_PATH = FONTS_DIR / "Inter-Medium.ttf"
 
 MAX_ANGLE_SIN: float = 0.99999
 SURFACE_OFFSET_PX: float = 249.0
-FORCE_OFFSET_PX: float = 250.0
+ARROW_OFFSET_PX: float = 250.0
+ARROW_BASE_W_PX: float = 100.0
 MARKER_WIDTH_PX: float = 5.0
 FONT_OFFSET_PX: float = 10.0
-TEXT_LINE_SPACING: float = 1.2
 
-Color = tuple[int, int, int] | tuple[int, int, int, int]
 BACKGROUND_COLOR: Color = (30, 33, 39)
 SURFACE_COLOR: Color = (45, 50, 58)
 MARKER_COLOR: Color = (0, 255, 200)
@@ -101,7 +100,7 @@ class SimulationRenderer:
         pygame.init()
 
         self._robot_tex = self._graphics_renderer.create_texture(ROBOT_IMG_PATH)
-        self._arrow_tex = self._graphics_renderer.create_texture(FORCE_IMG_PATH)
+        self._arrow_tex = self._graphics_renderer.create_texture(ARROW_IMG_PATH)
         self._font = self._graphics_renderer.create_font(FONT_PATH, self._font_size)
 
     @property
@@ -232,16 +231,19 @@ class SimulationRenderer:
         )
 
         arrow_size = self.arrow_scale * math.log(abs(self._simulator.f) + 1.0)
-        arrow_w = self._arrow_tex.width * self.scale * arrow_size
+        arrow_w = (
+            self._arrow_tex.width * self.scale * arrow_size
+            + ARROW_BASE_W_PX * self.scale
+        )
         arrow_h = self._arrow_tex.height * self.scale
         if not math.isclose(self._simulator.f, 0.0):
             if self._simulator.f < 0.0:
-                arrow_x = x - FORCE_OFFSET_PX * self.scale - arrow_w
-                origin_x = arrow_w + FORCE_OFFSET_PX * self.scale
+                arrow_x = x - ARROW_OFFSET_PX * self.scale - arrow_w
+                origin_x = arrow_w + ARROW_OFFSET_PX * self.scale
                 flip_x = False
             else:
-                arrow_x = x + FORCE_OFFSET_PX * self.scale
-                origin_x = -FORCE_OFFSET_PX * self.scale
+                arrow_x = x + ARROW_OFFSET_PX * self.scale
+                origin_x = -ARROW_OFFSET_PX * self.scale
                 flip_x = True
             self._graphics_renderer.draw_texture(
                 self._arrow_tex,
@@ -268,7 +270,6 @@ class SimulationRenderer:
             "up-left",
             DYNAMIC_TEXT_COLOR,
             FONT_OFFSET_PX,
-            TEXT_LINE_SPACING,
         )
         self._graphics_renderer.draw_text(
             (
@@ -285,7 +286,6 @@ class SimulationRenderer:
             "down-left",
             STATIC_TEXT_COLOR,
             FONT_OFFSET_PX,
-            TEXT_LINE_SPACING,
         )
         self._graphics_renderer.draw_text(
             (
@@ -300,7 +300,6 @@ class SimulationRenderer:
             "up-right",
             STATIC_TEXT_COLOR,
             FONT_OFFSET_PX,
-            TEXT_LINE_SPACING,
         )
         self._graphics_renderer.draw_text(
             view_status_text,
@@ -308,7 +307,6 @@ class SimulationRenderer:
             "down-right",
             STATIC_TEXT_COLOR,
             FONT_OFFSET_PX,
-            TEXT_LINE_SPACING,
         )
 
     def render(self, view_status_text: tuple[str, ...]) -> None:

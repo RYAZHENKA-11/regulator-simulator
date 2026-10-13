@@ -3,6 +3,7 @@
 import math
 import os
 import pathlib
+from collections import OrderedDict
 
 try:
     import pygame
@@ -14,6 +15,8 @@ except ImportError as exc:
     ) from exc
 
 from .window_manager import WindowManager
+
+Color = tuple[int, int, int] | tuple[int, int, int, int]
 
 
 class GraphicsRenderer:
@@ -30,14 +33,20 @@ class GraphicsRenderer:
     _scale_quality: int
     _renderer: Renderer
     _size: tuple[int, int]
-    _target_texture: Texture
+    _ssaa_chain: list[Texture]
+    _text_cache: OrderedDict[tuple[pygame.font.Font, str, Color], tuple[Texture, int]]
+    _text_cache_maxsize: int
+    _text_cache_budget_bytes: int
+    _text_cache_current_bytes: int
 
     def __init__(
         self,
         window_manager: WindowManager,
         ssaa: int = 2,
-        scale_quality: int = 2,
+        scale_quality: int = 1,
         vsync: bool = True,
+        text_cache_maxsize: int = 256,
+        text_cache_budget_mb: int = 16,
     ) -> None:
         """Initialize the graphics renderer.
 
@@ -50,21 +59,44 @@ class GraphicsRenderer:
                 ``0`` for nearest pixel sampling,
                 ``1`` for linear filtering,
                 ``2`` for anisotropic filtering.
-                Defaults to ``2``.
+                Defaults to ``1``.
             vsync: Whether to enable vertical synchronization.
                 Defaults to ``True``.
+            text_cache_maxsize: Maximum number of text textures to cache.
+                Must be a positive integer. Defaults to ``256``.
+            text_cache_budget_mb: Maximum memory budget for the text cache in megabytes.
+                Must be a positive integer. Defaults to ``16``.
 
         Raises:
-            ValueError: If ``ssaa`` is not a power of two or
-                ``scale_quality`` is not ``0``/``1``/``2``.
+            ValueError: If ``ssaa`` is not a power of two,
+                ``scale_quality`` is not ``0``/``1``/``2``,
+                ``text_cache_maxsize`` is not a positive integer,
+                ``text_cache_budget_mb`` is not a positive integer.
         """
-        if ssaa <= 0 or not math.isclose(math.log2(ssaa) % 1, 0.0):
+        if (
+            not isinstance(ssaa, int)
+            or isinstance(ssaa, bool)
+            or ssaa <= 0
+            or not math.isclose(math.log2(ssaa) % 1, 0.0)
+        ):
             raise ValueError(
                 "Supersampling Anti-Aliasing factor must be a power of two. "
                 "Usually 1/2/4/8."
             )
         if scale_quality not in (0, 1, 2):
             raise ValueError("Scale quality must be 0/1/2.")
+        if (
+            not isinstance(text_cache_maxsize, int)
+            or isinstance(text_cache_maxsize, bool)
+            or text_cache_maxsize <= 0
+        ):
+            raise ValueError("Text cache max size must be a positive integer.")
+        if (
+            not isinstance(text_cache_budget_mb, int)
+            or isinstance(text_cache_budget_mb, bool)
+            or text_cache_budget_mb <= 0
+        ):
+            raise ValueError("Text cache budget must be a positive integer.")
 
         self._window_manager = window_manager
         self._ssaa = ssaa
@@ -74,7 +106,11 @@ class GraphicsRenderer:
         os.environ["SDL_RENDER_SCALE_QUALITY"] = str(self._scale_quality)
 
         self._renderer = window_manager.create_renderer(vsync)
-        self._size, self._target_texture = self._recreate_target_texture()
+        self._size, self._ssaa_chain = self._recreate_ssaa_chain()
+        self._text_cache = OrderedDict()
+        self._text_cache_maxsize = text_cache_maxsize
+        self._text_cache_budget_bytes = text_cache_budget_mb * 1024 * 1024
+        self._text_cache_current_bytes = 0
 
     @property
     def size(self) -> tuple[int, int]:
@@ -85,7 +121,7 @@ class GraphicsRenderer:
     def size(self, size: tuple[int, int]) -> None:
         """Set the logical render size ``(width, height)`` in logical pixels."""
         self._window_manager.size = size
-        self.update_target_texture()
+        self.update_size()
 
     @property
     def width(self) -> int:
@@ -107,49 +143,114 @@ class GraphicsRenderer:
         """Set the logical render height in logical pixels."""
         self.size = (self.width, height)
 
-    def _recreate_target_texture(self) -> tuple[tuple[int, int], Texture]:
-        """Recreate the target texture from the current window size and SSAA.
+    def _recreate_ssaa_chain(self) -> tuple[tuple[int, int], list[Texture]]:
+        """Recreate the ssaa chain from the current window size and SSAA.
 
-        The created texture is also set as the active render target.
+        The highest-resolution texture (``chain[0]``) is also set as the
+        active render target.
 
         Returns:
-            The logical size ``(width, height)`` and the newly created target texture.
+            The logical size ``(width, height)`` and the newly created ssaa chain.
         """
         size = self._window_manager.size
-        texture = Texture(
-            self._renderer,
-            (size[0] * self._ssaa, size[1] * self._ssaa),
-            target=True,
-            scale_quality=self._scale_quality,
-        )
-        self._renderer.target = texture
-        return size, texture
+        chain = []
+        factor = self._ssaa
+        while factor >= 1:
+            chain.append(
+                Texture(
+                    self._renderer,
+                    (size[0] * factor, size[1] * factor),
+                    target=True,
+                    scale_quality=self._scale_quality,
+                )
+            )
+            factor //= 2
+        self._renderer.target = chain[0]
+        return size, chain
 
-    def update_target_texture(self) -> None:
-        """Update the target texture from the current window size and SSAA.
+    def update_size(self) -> None:
+        """Update the logical size and recreate the ssaa chain.
 
-        Call this method after the window size changes.
+        The logical size and the ssaa chain are derived from the current window
+        size and the SSAA factor. Call this method after the window size changes.
         """
-        self._size, self._target_texture = self._recreate_target_texture()
+        self._size, self._ssaa_chain = self._recreate_ssaa_chain()
 
-    def create_font(self, path: pathlib.Path | str, size: int) -> pygame.font.Font:
-        """Create a new font object.
+    def present(
+        self, destination: Texture | None = None, surface: pygame.Surface | None = None
+    ) -> None:
+        """Render the off-screen ssaa chain into a destination render target.
+
+        The highest-resolution texture of the chain stays the active render
+        target afterward.
 
         Args:
-            path: Path to the font file.
-            size: Font size in logical pixels.
-                The actual font size is multiplied by the SSAA factor.
-
-        Returns:
-            A new ``pygame.font.Font`` object.
-
-        Raises:
-            FileNotFoundError: If ``path`` does not point to an existing file.
+            destination: Render target that receives the frame. If ``None``,
+                the frame is presented to the window. Defaults to ``None``.
+            surface: Optional surface that receives a software copy of the presented
+                frame. If ``None``, no copy is made. Defaults to ``None``.
         """
-        try:
-            return pygame.font.Font(path, size * self._ssaa)
-        except FileNotFoundError as exc:
-            raise FileNotFoundError(f"Font file not found: {path}.") from exc
+        tex = self._ssaa_chain[0]
+        for next_tex in self._ssaa_chain[1:]:
+            self._renderer.target = next_tex
+            tex.draw(dstrect=(0.0, 0.0, next_tex.width, next_tex.height))
+            tex = next_tex
+        self._renderer.target = destination
+        tex.draw(dstrect=(0.0, 0.0, self.width, self.height))
+        if surface is not None:
+            self._renderer.to_surface(surface)
+        self._renderer.present()
+        self._renderer.target = self._ssaa_chain[0]
+
+    def set_color(self, color: Color) -> None:
+        """Set the draw color used by subsequent fill and clear operations.
+
+        Args:
+            color: A tuple representing the RGB/RGBA color values.
+        """
+        self._renderer.draw_color = color
+
+    def clear(self) -> None:
+        """Clear the render target."""
+        self._renderer.clear()
+
+    def fill_rect(self, rect: tuple[float, float, float, float]) -> None:
+        """Fill a rectangle.
+
+        Args:
+            rect: A tuple representing the rectangle ``(x, y, width, height)``
+                in logical pixels.
+        """
+        self._renderer.fill_rect(
+            (
+                rect[0] * self._ssaa,
+                rect[1] * self._ssaa,
+                rect[2] * self._ssaa,
+                rect[3] * self._ssaa,
+            )
+        )
+
+    def fill_quad(
+        self,
+        p1: tuple[float, float],
+        p2: tuple[float, float],
+        p3: tuple[float, float],
+        p4: tuple[float, float],
+    ) -> None:
+        """Fill a quadrilateral.
+
+        Args:
+            p1: The first point of the quad ``(x, y)`` in logical pixels.
+            p2: The second point of the quad ``(x, y)`` in logical pixels.
+            p3: The third point of the quad ``(x, y)`` in logical pixels.
+            p4: The fourth point of the quad ``(x, y)`` in logical pixels.
+        """
+        self._renderer.fill_quad(
+            (p1[0] * self._ssaa, p1[1] * self._ssaa),
+            (p2[0] * self._ssaa, p2[1] * self._ssaa),
+            (p3[0] * self._ssaa, p3[1] * self._ssaa),
+            (p4[0] * self._ssaa, p4[1] * self._ssaa),
+        )
 
     def create_texture(
         self,
@@ -180,78 +281,6 @@ class GraphicsRenderer:
             return Texture.from_surface(self._renderer, pygame.image.load(source))
         except FileNotFoundError as exc:
             raise FileNotFoundError(f"Image file not found: {source}.") from exc
-
-    def set_color(
-        self, color: tuple[int, int, int] | tuple[int, int, int, int]
-    ) -> None:
-        """Set the draw color used by subsequent fill and clear operations.
-
-        Args:
-            color: A tuple representing the RGB/RGBA color values.
-        """
-        self._renderer.draw_color = color
-
-    def clear(self) -> None:
-        """Clear the render target."""
-        self._renderer.clear()
-
-    def present(
-        self, destination: Texture | None = None, surface: pygame.Surface | None = None
-    ) -> None:
-        """Render the off-screen target texture into a destination render target.
-
-        The off-screen texture stays the active render target afterward.
-
-        Args:
-            destination: Render target that receives the frame. If ``None``,
-                the frame is presented to the window. Defaults to ``None``.
-            surface: Optional surface that receives a software copy of the presented
-                frame. If ``None``, no copy is made. Defaults to ``None``.
-        """
-        self._renderer.target = destination
-        self._target_texture.draw(dstrect=(0.0, 0.0, self.width, self.height))
-        self._renderer.present()
-        if surface is not None:
-            self._renderer.to_surface(surface=surface)
-        self._renderer.target = self._target_texture
-
-    def fill_quad(
-        self,
-        p1: tuple[float, float],
-        p2: tuple[float, float],
-        p3: tuple[float, float],
-        p4: tuple[float, float],
-    ) -> None:
-        """Fill a quadrilateral.
-
-        Args:
-            p1: The first point of the quad ``(x, y)`` in logical pixels.
-            p2: The second point of the quad ``(x, y)`` in logical pixels.
-            p3: The third point of the quad ``(x, y)`` in logical pixels.
-            p4: The fourth point of the quad ``(x, y)`` in logical pixels.
-        """
-        self._renderer.fill_quad(
-            (p1[0] * self._ssaa, p1[1] * self._ssaa),
-            (p2[0] * self._ssaa, p2[1] * self._ssaa),
-            (p3[0] * self._ssaa, p3[1] * self._ssaa),
-            (p4[0] * self._ssaa, p4[1] * self._ssaa),
-        )
-
-    def fill_rect(self, rect: tuple[float, float, float, float]) -> None:
-        """Fill a rectangle.
-
-        Args:
-            rect: A tuple representing the rectangle ``(x, y, width, height)``
-                in logical pixels.
-        """
-        self._renderer.fill_rect(
-            (
-                rect[0] * self._ssaa,
-                rect[1] * self._ssaa,
-                rect[2] * self._ssaa,
-                rect[3] * self._ssaa,
-            )
-        )
 
     def draw_texture(
         self,
@@ -300,14 +329,65 @@ class GraphicsRenderer:
             flip_y=flip_y,
         )
 
+    def create_font(self, path: pathlib.Path | str, size: int) -> pygame.font.Font:
+        """Create a new font object.
+
+        Args:
+            path: Path to the font file.
+            size: Font size in logical pixels.
+                The actual font size is multiplied by the SSAA factor.
+
+        Returns:
+            A new ``pygame.font.Font`` object.
+
+        Raises:
+            FileNotFoundError: If ``path`` does not point to an existing file.
+        """
+        try:
+            return pygame.font.Font(path, size * self._ssaa)
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(f"Font file not found: {path}.") from exc
+
+    def _get_text_texture(
+        self, text: str, font: pygame.font.Font, color: Color
+    ) -> Texture:
+        """Get a cached text texture or create a new one.
+
+        Args:
+            text: The text to render.
+            font: The font to use.
+            color: A tuple representing the RGB/RGBA color values.
+
+        Returns:
+            A cached or newly created text texture.
+        """
+        key = (font, text, tuple(color))
+        cached = self._text_cache.get(key)
+        if cached is not None:
+            self._text_cache.move_to_end(key)
+            return cached[0]
+
+        texture = self.create_texture(font.render(text, True, color))
+        size_bytes = texture.width * texture.height * 4
+        self._text_cache[key] = (texture, size_bytes)
+        self._text_cache_current_bytes += size_bytes
+
+        while (
+            self._text_cache_current_bytes > self._text_cache_budget_bytes
+            or len(self._text_cache) > self._text_cache_maxsize
+        ):
+            _, (_, evicted_bytes) = self._text_cache.popitem(last=False)
+            self._text_cache_current_bytes -= evicted_bytes
+
+        return texture
+
     def draw_text(
         self,
         lines: tuple[str, ...],
         font: pygame.font.Font,
         position: str,
-        color: tuple[int, int, int] | tuple[int, int, int, int],
+        color: Color,
         offset: float,
-        line_spacing: float,
     ) -> None:
         """Draw the text.
 
@@ -319,8 +399,6 @@ class GraphicsRenderer:
             color: A tuple representing the RGB/RGBA color values.
             offset: The distance from the corresponding render target edges
                 in logical pixels.
-            line_spacing: The line spacing multiplier. The vertical distance
-                between lines is ``line_height * line_spacing``.
 
         Raises:
             ValueError: If ``position`` is not
@@ -331,16 +409,15 @@ class GraphicsRenderer:
 
         if "down" in position:
             lines = lines[::-1]
+        line_height = font.get_linesize()
         for i, s in enumerate(lines):
-            tex = self.create_texture(font.render(s, True, color))
+            tex = self._get_text_texture(s, font, color)
             if "left" in position:
                 x = offset * self._ssaa
             else:
                 x = (self.width - offset) * self._ssaa - tex.width
             if "up" in position:
-                y = offset * self._ssaa + i * tex.height * line_spacing
+                y = offset * self._ssaa + i * line_height
             else:
-                y = (self.height - offset) * self._ssaa - (
-                    i + 1
-                ) * tex.height * line_spacing
+                y = (self.height - offset) * self._ssaa - (i + 1) * line_height
             tex.draw(dstrect=(x, y))
